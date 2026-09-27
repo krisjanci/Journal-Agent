@@ -1,7 +1,7 @@
 # Journal-Agent
 A macOS journal app
 
-## Work Flow
+## Planned Work Flow
 
 - The app opens and has a simple microphone button
 
