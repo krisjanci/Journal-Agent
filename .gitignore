@@ -8,3 +8,5 @@ xcuserdata/
 *.sqlite-shm
 *.sqlite-wal
 journal.csv
+Recordings/
+*.caf

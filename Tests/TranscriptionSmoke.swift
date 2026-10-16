@@ -31,8 +31,11 @@ struct TranscriptionSmoke {
             return transcript
         }
         try await analyzer.start(inputSequence: stream)
+        let recordingURL = FileManager.default.temporaryDirectory.appendingPathComponent("JournalAudioTest-\(UUID()).caf")
+        defer { try? FileManager.default.removeItem(at: recordingURL) }
+        let recording = try AVAudioFile(forWriting: recordingURL, settings: format.settings)
         let bridge = try AudioBridge(source: audio.processingFormat, target: format, continuation: continuation,
-            level: { _ in }, failure: { message in fatalError(message) })
+            recording: recording, level: { _ in }, failure: { message in fatalError(message) })
         while audio.framePosition < audio.length {
             let buffer = AVAudioPCMBuffer(pcmFormat: audio.processingFormat, frameCapacity: 4096)!
             try audio.read(into: buffer)
@@ -45,6 +48,7 @@ struct TranscriptionSmoke {
         guard text.lowercased().contains("journal"), text.lowercased().contains("walk") else {
             throw JournalFailure(message: "Expected test words were not transcribed.")
         }
-        print("PASS: audio conversion and on-device transcription")
+        guard recording.length > 0 else { throw JournalFailure(message: "Recording was empty") }
+        print("PASS: audio conversion, retained recording, and on-device transcription")
     }
 }

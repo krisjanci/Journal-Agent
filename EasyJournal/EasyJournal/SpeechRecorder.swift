@@ -8,11 +8,13 @@ final class AudioBridge: @unchecked Sendable {
     let continuation: AsyncStream<AnalyzerInput>.Continuation
     let targetFormat: AVAudioFormat
     let converter: AVAudioConverter?
+    let recording: AVAudioFile?
     let level: @Sendable (Float) -> Void
     let failure: @Sendable (String) -> Void
 
     init(source: AVAudioFormat, target: AVAudioFormat, continuation: AsyncStream<AnalyzerInput>.Continuation,
-         level: @escaping @Sendable (Float) -> Void, failure: @escaping @Sendable (String) -> Void) throws {
+         recording: AVAudioFile? = nil, level: @escaping @Sendable (Float) -> Void, failure: @escaping @Sendable (String) -> Void) throws {
+        self.recording = recording
         self.continuation = continuation; targetFormat = target; self.level = level; self.failure = failure
         converter = source == target ? nil : AVAudioConverter(from: source, to: target)
         if source != target && converter == nil { throw JournalFailure(message: "This microphone's audio format isn't supported. Choose another input in System Settings → Sound.") }
@@ -43,6 +45,8 @@ final class AudioBridge: @unchecked Sendable {
             }
         }
         if output.frameLength > 0 {
+            do { try recording?.write(from: output) }
+            catch { failure("The recording couldn't be saved. Your transcript is preserved. " + error.localizedDescription); return }
             if case .dropped = continuation.yield(AnalyzerInput(buffer: output)) {
                 failure("Transcription couldn't keep up with the microphone. Your draft is preserved; please try again.")
             }
@@ -60,6 +64,7 @@ final class SpeechRecorder: ObservableObject {
     @Published private(set) var status = "Ready when you are"
     @Published var error: String?
     var isBusy: Bool { phase != .idle }
+    var onRecordingCreated: ((URL) -> Void)?
     var onTranscript: ((String, TimeInterval) -> Void)?
     private var engine: AVAudioEngine?
     private var analyzer: SpeechAnalyzer?
@@ -72,7 +77,7 @@ final class SpeechRecorder: ObservableObject {
     private var sessionID = UUID()
     private var configurationObserver: NSObjectProtocol?
 
-    func start(localeID: String) {
+    func start(localeID: String, recordingURL: URL? = nil) {
         guard phase == .idle else { return }
         phase = .preparing; status = "Preparing your microphone…"; error = nil
         transcript = ""; committed = ""; elapsed = 0; level = 0
@@ -128,8 +133,10 @@ final class SpeechRecorder: ObservableObject {
                     }
                 }
                 try await analyzer.start(inputSequence: stream)
+                let recording = try recordingURL.map { try AVAudioFile(forWriting: $0, settings: format.settings) }
+                if let recordingURL { onRecordingCreated?(recordingURL) }
                 let bridge = try AudioBridge(source: source, target: format, continuation: continuation,
-                    level: { [weak self] value in Task { @MainActor [weak self] in
+                    recording: recording, level: { [weak self] value in Task { @MainActor [weak self] in
                         guard let self, self.sessionID == session, self.phase == .recording else { return }
                         self.level = value
                     } }, failure: { [weak self] message in Task { @MainActor [weak self] in
