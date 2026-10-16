@@ -133,7 +133,7 @@ final class SpeechRecorder: ObservableObject {
                     }
                 }
                 try await analyzer.start(inputSequence: stream)
-                let recording = try recordingURL.map { try AVAudioFile(forWriting: $0, settings: format.settings) }
+                let recording = try recordingURL.map { try AVAudioFile(forWriting: $0, settings: format.settings, commonFormat: format.commonFormat, interleaved: format.isInterleaved) }
                 if let recordingURL { onRecordingCreated?(recordingURL) }
                 let bridge = try AudioBridge(source: source, target: format, continuation: continuation,
                     recording: recording, level: { [weak self] value in Task { @MainActor [weak self] in

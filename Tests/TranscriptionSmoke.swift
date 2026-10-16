@@ -1,10 +1,12 @@
 import AVFoundation
 import Foundation
+import Darwin
 import Speech
 
 @main
 struct TranscriptionSmoke {
     static func main() async throws {
+        setbuf(stdout, nil)
         guard CommandLine.arguments.count == 2 else { throw JournalFailure(message: "Pass a local audio file path.") }
         guard SpeechTranscriber.isAvailable,
               let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US")) else {
@@ -33,7 +35,7 @@ struct TranscriptionSmoke {
         try await analyzer.start(inputSequence: stream)
         let recordingURL = FileManager.default.temporaryDirectory.appendingPathComponent("JournalAudioTest-\(UUID()).caf")
         defer { try? FileManager.default.removeItem(at: recordingURL) }
-        let recording = try AVAudioFile(forWriting: recordingURL, settings: format.settings)
+        let recording = try AVAudioFile(forWriting: recordingURL, settings: format.settings, commonFormat: format.commonFormat, interleaved: format.isInterleaved)
         let bridge = try AudioBridge(source: audio.processingFormat, target: format, continuation: continuation,
             recording: recording, level: { _ in }, failure: { message in fatalError(message) })
         while audio.framePosition < audio.length {
