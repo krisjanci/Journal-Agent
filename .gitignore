@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+Build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+journal.csv
