@@ -18,6 +18,8 @@ struct ContentView: View {
     @State private var manualEntry = false
     @State private var baseText = ""
     @State private var baseDuration: Double = 0
+    @State private var editing: JournalEntry?
+    @State private var deleting: JournalEntry?
     @State private var confirmDiscard = false
     @AppStorage("transcriptionLocale") private var language = "en-US"
     @FocusState private var editorFocused: Bool
@@ -65,6 +67,11 @@ struct ContentView: View {
         }
         .onChange(of: journal.draft.text) { _, _ in journal.persistDraft() }
         .onChange(of: journal.draft.title) { _, _ in journal.persistDraft() }
+        .sheet(item: $editing) { entry in EntryEditor(entry: entry) { journal.update($0) } }
+        .alert("Delete this entry?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+            Button("Cancel", role: .cancel) { deleting = nil }
+            Button("Delete", role: .destructive) { if let deleting { journal.delete(deleting) }; deleting = nil }
+        } message: { Text("This removes the entry from your journal and its automatic CSV. Exported copies are not changed.") }
         .alert("Discard this draft?", isPresented: $confirmDiscard) {
             Button("Keep writing", role: .cancel) {}
             Button("Discard", role: .destructive) { journal.discardDraft(); manualEntry = false }
@@ -214,6 +221,8 @@ struct ContentView: View {
                 Text("\(entry.wordCount) words")
                 if entry.duration > 0 { Text(duration(entry.duration)) }
                 Spacer()
+                Button("Edit") { editing = entry }.buttonStyle(.bordered)
+                Button { deleting = entry } label: { Image(systemName: "trash") }.buttonStyle(.borderless).help("Delete entry")
             }.font(.system(size: 11)).foregroundStyle(.secondary)
             Divider()
             Text(entry.text).font(.system(size: 16)).lineSpacing(9).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
@@ -243,4 +252,23 @@ struct ContentView: View {
         }
     }
     private func duration(_ seconds: Double) -> String { String(format: "%02d:%02d", Int(seconds) / 60, Int(seconds) % 60) }
+}
+
+private struct EntryEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State var entry: JournalEntry
+    var save: (JournalEntry) -> Bool
+    @State private var saveFailed = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Edit entry").font(.title2.weight(.semibold))
+            if saveFailed { Text("Could not save changes. Your edits are still here; please try again.").foregroundStyle(.red).font(.caption) }
+            TextField("Title (optional)", text: $entry.title).textFieldStyle(.roundedBorder)
+            TextEditor(text: $entry.text).font(.body).frame(minHeight: 250).border(.secondary.opacity(0.15))
+            HStack { Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction); Spacer()
+                Button("Save changes") { if save(entry) { dismiss() } else { saveFailed = true } }.buttonStyle(.borderedProminent)
+                    .disabled(entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).keyboardShortcut(.defaultAction)
+            }
+        }.padding(28).frame(width: 570).tint(Palette.accent)
+    }
 }
