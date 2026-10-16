@@ -9,7 +9,7 @@ struct StorageTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("JournalAgentTests-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
         var store: JournalStore? = try JournalStore(directory: directory)
-        var entry = JournalEntry(createdAt: Date(timeIntervalSince1970: 1_800_000_000), updatedAt: Date(timeIntervalSince1970: 1_800_000_000), title: "A day, with \"quotes\"", text: "A first line.\nCafé 🌿, \"hello\".", source: "voice", duration: 61.5)
+        var entry = JournalEntry(createdAt: Date(timeIntervalSince1970: 1_800_000_000), updatedAt: Date(timeIntervalSince1970: 1_800_000_000), title: "A day, with \"quotes\"", text: "A first line.\nCafé 🌿, \"hello\".", source: "voice", duration: 61.5, audioFiles: [])
         try store!.saveDraft(entry)
         store = nil
         store = try JournalStore(directory: directory)
