@@ -191,7 +191,7 @@ final class JournalStore {
         func json<T: Encodable>(_ value: T) -> String { (try? String(decoding: JSONEncoder().encode(value), as: UTF8.self)) ?? "[]" }
         return header + entries.map { entry in
             let analysis = entry.currentAnalysis
-            return [entry.id, formatter.string(from: entry.createdAt), formatter.string(from: entry.updatedAt), entry.displayTitle,
+            return [entry.id, formatter.string(from: entry.createdAt), formatter.string(from: entry.updatedAt), entry.title.isEmpty ? (analysis?.title ?? entry.displayTitle) : entry.title,
              entry.text, entry.source, String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), entry.duration), String(entry.wordCount),
              analysis?.summary ?? "", json(analysis?.topics ?? []), json(analysis?.activities ?? []),
              json(analysis?.accomplishments ?? []), json(analysis?.nextSteps ?? []), json(analysis?.feelings ?? []),
