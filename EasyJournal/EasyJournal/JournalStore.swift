@@ -9,6 +9,11 @@ struct JournalEntry: Identifiable, Codable, Equatable {
     var text: String = ""
     var source: String = "manual"
     var duration: Double = 0
+    var audioFiles: [String]? = nil
+    var analysis: JournalAnalysis? = nil
+    var currentAnalysis: JournalAnalysis? { analysis.flatMap { $0.isCurrent(for: text) ? $0 : nil } }
+    var summaryTitle: String { title.isEmpty ? (currentAnalysis?.title ?? "Summary pending") : title }
+    var summaryPreview: String { currentAnalysis?.summary ?? "Saved safely. A local AI summary will appear here when ready." }
     var wordCount: Int { text.split { $0.isWhitespace || $0.isNewline }.count }
     var displayTitle: String {
         if !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
@@ -41,11 +46,27 @@ final class JournalStore {
         }
         sqlite3_busy_timeout(db, 5000)
         do {
+            try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA journal_mode=WAL")
             try execute("PRAGMA synchronous=FULL")
             try execute("CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, created_at REAL NOT NULL, updated_at REAL NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, duration_seconds REAL NOT NULL)")
             try execute("CREATE TABLE IF NOT EXISTS draft (singleton INTEGER PRIMARY KEY CHECK(singleton=1), payload BLOB NOT NULL)")
-            try execute("PRAGMA user_version=1")
+            let versionStatement = try prepare("PRAGMA user_version")
+            let versionResult = sqlite3_step(versionStatement)
+            let version = sqlite3_column_int(versionStatement, 0)
+            sqlite3_finalize(versionStatement)
+            guard versionResult == SQLITE_ROW, version <= 2 else {
+                throw JournalFailure(message: "This journal was created by a newer app version. Open it with the latest Journal Agent.")
+            }
+            if version < 2 {
+                try execute("BEGIN IMMEDIATE")
+                do {
+                    try execute("ALTER TABLE entries ADD COLUMN audio_files TEXT NOT NULL DEFAULT '[]'")
+                    try execute("CREATE TABLE IF NOT EXISTS entry_analysis (entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE, payload BLOB NOT NULL)")
+                    try execute("PRAGMA user_version=2")
+                    try execute("COMMIT")
+                } catch { try? execute("ROLLBACK"); throw error }
+            }
         } catch {
             sqlite3_close(db); db = nil
             throw error
@@ -68,7 +89,7 @@ final class JournalStore {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw JournalFailure(message: errorMessage) }
     }
     func entries() throws -> [JournalEntry] {
-        let stmt = try prepare("SELECT id, created_at, updated_at, title, text, source, duration_seconds FROM entries ORDER BY created_at DESC, id")
+        let stmt = try prepare("SELECT e.id, e.created_at, e.updated_at, e.title, e.text, e.source, e.duration_seconds, e.audio_files, a.payload FROM entries e LEFT JOIN entry_analysis a ON a.entry_id=e.id ORDER BY e.created_at DESC, e.id")
         defer { sqlite3_finalize(stmt) }
         var result: [JournalEntry] = []
         var status = sqlite3_step(stmt)
@@ -76,23 +97,30 @@ final class JournalStore {
         while status == SQLITE_ROW {
             result.append(JournalEntry(id: string(0), createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1)),
                 updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2)), title: string(3), text: string(4),
-                source: string(5), duration: sqlite3_column_double(stmt, 6)))
+                source: string(5), duration: sqlite3_column_double(stmt, 6),
+                audioFiles: try JSONDecoder().decode([String].self, from: Data(string(7).utf8))))
+            if let bytes = sqlite3_column_blob(stmt, 8) {
+                let payload = Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, 8)))
+                // An unusable derived summary must never make original entries unreadable.
+                result[result.count - 1].analysis = try? JSONDecoder().decode(JournalAnalysis.self, from: payload)
+            }
             status = sqlite3_step(stmt)
         }
         guard status == SQLITE_DONE else { throw JournalFailure(message: errorMessage) }
         return result
     }
     func save(_ entry: JournalEntry, clearingDraft: Bool = false) throws {
-        guard !entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw JournalFailure(message: "Add a few words before saving.") }
+        guard !entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(entry.audioFiles ?? []).isEmpty else { throw JournalFailure(message: "Add a few words before saving.") }
         try execute("BEGIN IMMEDIATE")
         do {
-            let stmt = try prepare("INSERT INTO entries VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at, title=excluded.title, text=excluded.text, source=excluded.source, duration_seconds=excluded.duration_seconds")
+            let stmt = try prepare("INSERT INTO entries (id, created_at, updated_at, title, text, source, duration_seconds, audio_files) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at, title=excluded.title, text=excluded.text, source=excluded.source, duration_seconds=excluded.duration_seconds, audio_files=excluded.audio_files")
             defer { sqlite3_finalize(stmt) }
             bind(entry.id, to: stmt, at: 1)
             sqlite3_bind_double(stmt, 2, entry.createdAt.timeIntervalSince1970)
             sqlite3_bind_double(stmt, 3, entry.updatedAt.timeIntervalSince1970)
             bind(entry.title, to: stmt, at: 4); bind(entry.text, to: stmt, at: 5); bind(entry.source, to: stmt, at: 6)
             sqlite3_bind_double(stmt, 7, entry.duration)
+            bind(String(decoding: try JSONEncoder().encode(entry.audioFiles ?? []), as: UTF8.self), to: stmt, at: 8)
             try run(stmt)
             if clearingDraft { try execute("DELETE FROM draft") }
             try execute("COMMIT")
@@ -102,6 +130,35 @@ final class JournalStore {
         let stmt = try prepare("DELETE FROM entries WHERE id=?")
         defer { sqlite3_finalize(stmt) }
         bind(id, to: stmt, at: 1); try run(stmt)
+    }
+    func saveAnalysis(_ analysis: JournalAnalysis, for id: String) throws {
+        // Check the transcript inside the write transaction so stale work cannot replace newer edits.
+        try execute("BEGIN IMMEDIATE")
+        do {
+            let current = try prepare("SELECT text FROM entries WHERE id=?")
+            defer { sqlite3_finalize(current) }
+            bind(id, to: current, at: 1)
+            guard sqlite3_step(current) == SQLITE_ROW,
+                  analysis.isCurrent(for: String(cString: sqlite3_column_text(current, 0))) else {
+                throw JournalFailure(message: "The entry changed while it was being summarized. Please try again.")
+            }
+            let data = try JSONEncoder().encode(analysis)
+            let stmt = try prepare("INSERT INTO entry_analysis VALUES (?, ?) ON CONFLICT(entry_id) DO UPDATE SET payload=excluded.payload")
+            defer { sqlite3_finalize(stmt) }
+            bind(id, to: stmt, at: 1)
+            _ = data.withUnsafeBytes { sqlite3_bind_blob(stmt, 2, $0.baseAddress, Int32(data.count), transient) }
+            try run(stmt)
+            try execute("COMMIT")
+        } catch { try? execute("ROLLBACK"); throw error }
+    }
+    var audioDirectory: URL { directory.appendingPathComponent("Recordings", isDirectory: true) }
+    func newRecordingURL() throws -> URL {
+        try FileManager.default.createDirectory(at: audioDirectory, withIntermediateDirectories: true)
+        return audioDirectory.appendingPathComponent(UUID().uuidString + ".caf")
+    }
+    func recordingURL(_ name: String) -> URL? {
+        guard name == URL(fileURLWithPath: name).lastPathComponent, name.hasSuffix(".caf") else { return nil }
+        return audioDirectory.appendingPathComponent(name)
     }
     func saveDraft(_ entry: JournalEntry) throws {
         let data = try JSONEncoder().encode(entry)
@@ -130,10 +187,16 @@ final class JournalStore {
             let safe = leading.map { "=+-@".contains($0) } == true ? "'" + text : text
             return "\"" + safe.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         }
-        let header = "id,created_at,updated_at,title,text,source,duration_seconds,word_count\r\n"
+        let header = "id,created_at,updated_at,title,text,source,duration_seconds,word_count,summary,topics,activities,accomplishments,next_steps,feelings,analysis_generated_at,analysis_engine,analysis_system_version,analysis_version,analysis_source_hash,audio_files\r\n"
+        func json<T: Encodable>(_ value: T) -> String { (try? String(decoding: JSONEncoder().encode(value), as: UTF8.self)) ?? "[]" }
         return header + entries.map { entry in
-            [entry.id, formatter.string(from: entry.createdAt), formatter.string(from: entry.updatedAt), entry.displayTitle,
-             entry.text, entry.source, String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), entry.duration), String(entry.wordCount)]
+            let analysis = entry.currentAnalysis
+            return [entry.id, formatter.string(from: entry.createdAt), formatter.string(from: entry.updatedAt), entry.displayTitle,
+             entry.text, entry.source, String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), entry.duration), String(entry.wordCount),
+             analysis?.summary ?? "", json(analysis?.topics ?? []), json(analysis?.activities ?? []),
+             json(analysis?.accomplishments ?? []), json(analysis?.nextSteps ?? []), json(analysis?.feelings ?? []),
+             analysis.map { formatter.string(from: $0.generatedAt) } ?? "", analysis?.engine ?? "", analysis?.systemVersion ?? "",
+             analysis.map { String($0.version) } ?? "", analysis?.sourceHash ?? "", json(entry.audioFiles ?? [])]
                 .map(quote).joined(separator: ",")
         }.joined(separator: "\r\n") + (entries.isEmpty ? "" : "\r\n")
     }
