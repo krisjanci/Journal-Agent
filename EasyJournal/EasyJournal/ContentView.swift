@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-private enum Palette {
+enum Palette {
+    static let card = Color(nsColor: .controlBackgroundColor)
     static let ink = Color.primary
     static let accent = Color(red: 0.24, green: 0.38, blue: 0.33)
     static let paper = Color(nsColor: NSColor(name: nil) { appearance in
