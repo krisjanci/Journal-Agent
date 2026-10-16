@@ -103,4 +103,38 @@ final class JournalStore {
         defer { sqlite3_finalize(stmt) }
         bind(id, to: stmt, at: 1); try run(stmt)
     }
+    func saveDraft(_ entry: JournalEntry) throws {
+        let data = try JSONEncoder().encode(entry)
+        let stmt = try prepare("INSERT INTO draft VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET payload=excluded.payload")
+        defer { sqlite3_finalize(stmt) }
+        _ = data.withUnsafeBytes { sqlite3_bind_blob(stmt, 1, $0.baseAddress, Int32(data.count), transient) }
+        try run(stmt)
+    }
+    func draft() throws -> JournalEntry? {
+        let stmt = try prepare("SELECT payload FROM draft WHERE singleton=1")
+        defer { sqlite3_finalize(stmt) }
+        let status = sqlite3_step(stmt)
+        if status == SQLITE_DONE { return nil }
+        guard status == SQLITE_ROW, let bytes = sqlite3_column_blob(stmt, 0) else { throw JournalFailure(message: errorMessage) }
+        return try JSONDecoder().decode(JournalEntry.self, from: Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, 0))))
+    }
+    func clearDraft() throws { try execute("DELETE FROM draft") }
+    func writeCSV(to url: URL? = nil) throws {
+        try Self.csv(entries: entries()).write(to: url ?? csvURL, atomically: true, encoding: .utf8)
+    }
+    static func csv(entries: [JournalEntry]) -> String {
+        let formatter = ISO8601DateFormatter()
+        func quote(_ text: String) -> String {
+            // Keep spreadsheet applications from executing a journal sentence as a formula.
+            let leading = text.drop(while: { $0.isWhitespace }).first
+            let safe = leading.map { "=+-@".contains($0) } == true ? "'" + text : text
+            return "\"" + safe.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        let header = "id,created_at,updated_at,title,text,source,duration_seconds,word_count\r\n"
+        return header + entries.map { entry in
+            [entry.id, formatter.string(from: entry.createdAt), formatter.string(from: entry.updatedAt), entry.displayTitle,
+             entry.text, entry.source, String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), entry.duration), String(entry.wordCount)]
+                .map(quote).joined(separator: ",")
+        }.joined(separator: "\r\n") + (entries.isEmpty ? "" : "\r\n")
+    }
 }
