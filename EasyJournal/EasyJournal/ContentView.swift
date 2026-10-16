@@ -14,14 +14,20 @@ private enum Palette {
 struct ContentView: View {
     @EnvironmentObject private var journal: JournalModel
     @EnvironmentObject private var recorder: SpeechRecorder
+    @State private var search = ""
     @State private var manualEntry = false
     @State private var baseText = ""
     @State private var baseDuration: Double = 0
     @State private var confirmDiscard = false
     @AppStorage("transcriptionLocale") private var language = "en-US"
     @FocusState private var editorFocused: Bool
+    private var filtered: [JournalEntry] {
+        journal.entries.filter { search.isEmpty || $0.text.localizedCaseInsensitiveContains(search) || $0.displayTitle.localizedCaseInsensitiveContains(search) }
+    }
     var body: some View {
         HStack(spacing: 0) {
+            sidebar.frame(width: 254)
+            Divider()
             VStack(spacing: 0) {
                 HStack {
                     Label(journal.selected == nil ? "New entry" : "Your journal", systemImage: journal.selected == nil ? "circle.dotted" : "book.closed")
@@ -31,8 +37,8 @@ struct ContentView: View {
                 }.padding(.horizontal, 36).padding(.vertical, 20)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
-                        composer
-                        if let notice = journal.notice { Text(notice).font(.caption).foregroundStyle(Palette.accent) }
+                        if let entry = journal.selected { entryDetail(entry) }
+                        else { composer }
                         if let message = journal.error ?? recorder.error { errorBanner(message) }
                     }.padding(.horizontal, 48).padding(.top, 20).padding(.bottom, 40).frame(maxWidth: 880)
                         .frame(maxWidth: .infinity)
@@ -63,6 +69,49 @@ struct ContentView: View {
             Button("Keep writing", role: .cancel) {}
             Button("Discard", role: .destructive) { journal.discardDraft(); manualEntry = false }
         } message: { Text("This draft hasn't been added to your journal yet.") }
+    }
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "waveform").font(.system(size: 21, weight: .medium)).foregroundStyle(Palette.accent)
+                Text("Journal Agent").font(.system(size: 16, weight: .semibold))
+            }.padding(.top, 27).padding(.bottom, 30)
+            Button {
+                journal.selectedID = nil; journal.notice = nil
+            } label: {
+                HStack { Image(systemName: "plus"); Text(journal.hasDraft ? "Continue draft" : "New entry"); Spacer(); Text("⌘N").font(.caption) }
+                    .padding(12).foregroundStyle(.white).background(Palette.accent, in: RoundedRectangle(cornerRadius: 9))
+            }.buttonStyle(.plain).keyboardShortcut("n").disabled(recorder.isBusy)
+            HStack { Image(systemName: "magnifyingglass").foregroundStyle(.tertiary); TextField("Search your journal", text: $search).textFieldStyle(.plain) }
+                .font(.system(size: 12)).padding(10).background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7)).padding(.top, 22)
+            HStack { Text("ENTRIES").tracking(1.5); Spacer(); Text("\(journal.entries.count)").monospacedDigit() }
+                .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary).padding(.top, 27).padding(.bottom, 12)
+            ScrollView {
+                LazyVStack(spacing: 5) {
+                    if filtered.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(search.isEmpty ? "A little space for your day." : "No matching entries.").font(.system(size: 13, weight: .medium))
+                            Text(search.isEmpty ? "Your saved thoughts will live here." : "Try a different word or phrase.").font(.system(size: 12)).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 12)
+                    }
+                    ForEach(filtered) { entry in
+                        Button { journal.selectedID = entry.id; journal.notice = nil } label: {
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text(entry.createdAt.formatted(.dateTime.month(.abbreviated).day().hour().minute())).font(.system(size: 10)).foregroundStyle(.secondary)
+                                Text(entry.displayTitle).font(.system(size: 13, weight: .medium)).lineLimit(2).multilineTextAlignment(.leading)
+                                Label("\(entry.wordCount) words", systemImage: entry.source == "manual" ? "pencil.line" : "waveform").font(.system(size: 10)).foregroundStyle(.secondary)
+                            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(journal.selectedID == entry.id ? Palette.accent.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                        }.buttonStyle(.plain).disabled(recorder.isBusy)
+                    }
+                }
+            }
+            Divider().padding(.vertical, 16)
+            Button(action: journal.export) { Label("Export CSV", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity, alignment: .leading) }
+                .buttonStyle(.plain).font(.system(size: 12)).disabled(!journal.ready)
+            Button(action: journal.revealFiles) { Label("Show journal files", systemImage: "folder").frame(maxWidth: .infinity, alignment: .leading) }
+                .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary).padding(.top, 13).padding(.bottom, 24).disabled(!journal.ready)
+        }.padding(.horizontal, 20).background(Color(nsColor: .controlBackgroundColor))
     }
     private var composer: some View {
         VStack(alignment: .leading, spacing: 23) {
@@ -150,6 +199,26 @@ struct ContentView: View {
                     Text("Português (BR)").tag("pt-BR"); Text("日本語").tag("ja-JP")
                 }.labelsHidden().frame(width: 125).controlSize(.small).disabled(recorder.isBusy)
             }.foregroundStyle(.secondary)
+        }
+    }
+    private func entryDetail(_ entry: JournalEntry) -> some View {
+        VStack(alignment: .leading, spacing: 24) {
+            if let notice = journal.notice {
+                Label(notice, systemImage: "checkmark.circle.fill").font(.system(size: 12)).foregroundStyle(Palette.accent)
+            }
+            Text(entry.createdAt.formatted(.dateTime.weekday(.wide).month(.wide).day().year()).uppercased())
+                .font(.system(size: 10, weight: .medium)).tracking(1.5).foregroundStyle(.secondary)
+            Text(entry.displayTitle).font(.system(size: 32, weight: .regular, design: .serif)).textSelection(.enabled)
+            HStack(spacing: 15) {
+                Label(entry.source == "manual" ? "Written entry" : "Voice entry", systemImage: entry.source == "manual" ? "pencil.line" : "waveform")
+                Text("\(entry.wordCount) words")
+                if entry.duration > 0 { Text(duration(entry.duration)) }
+                Spacer()
+            }.font(.system(size: 11)).foregroundStyle(.secondary)
+            Divider()
+            Text(entry.text).font(.system(size: 16)).lineSpacing(9).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+            Divider().padding(.top, 15)
+            Label("Saved locally · Included in journal.csv", systemImage: "checkmark.circle").font(.system(size: 11)).foregroundStyle(.secondary)
         }
     }
     private func errorBanner(_ message: String) -> some View {
